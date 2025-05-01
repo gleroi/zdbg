@@ -5,8 +5,8 @@ const sdl3 = @cImport({
 });
 
 var gDone: bool = false;
-const WINDOW_WIDTH = 640;
-const WINDOW_HEIGH = 480;
+const WINDOW_WIDTH = 1920;
+const WINDOW_HEIGH = 1080;
 
 const ZdbgError = error{
     SdlInitializationFailed,
@@ -152,11 +152,8 @@ pub fn main() !void {
     context_set_swapchain_parameters(&context);
 
     {
-        const vertex_shader = try context_load_shader(&context, "assets/shaders/sprite.vert.spv", 1, 0, 0, 0);
+        const vertex_shader = try context_load_shader(&context, "assets/shaders/sprite.vert.spv", 0, 1, 1, 0);
         const fragment_shader = try context_load_shader(&context, "assets/shaders/sprite.frag.spv", 1, 0, 0, 0);
-        defer sdl3.SDL_ReleaseGPUShader(context.device, vertex_shader);
-        defer sdl3.SDL_ReleaseGPUShader(context.device, fragment_shader);
-
         context.render_pipeline = sdl3.SDL_CreateGPUGraphicsPipeline(context.device, &sdl3.SDL_GPUGraphicsPipelineCreateInfo{
             .target_info = sdl3.SDL_GPUGraphicsPipelineTargetInfo{ .num_color_targets = 1, .color_target_descriptions = &[_]sdl3.SDL_GPUColorTargetDescription{sdl3.SDL_GPUColorTargetDescription{ .format = sdl3.SDL_GetGPUSwapchainTextureFormat(context.device, context.window), .blend_state = sdl3.SDL_GPUColorTargetBlendState{
                 .enable_blend = true,
@@ -171,6 +168,8 @@ pub fn main() !void {
             .vertex_shader = vertex_shader,
             .fragment_shader = fragment_shader,
         }) orelse return ZdbgError.CreationFailed;
+        sdl3.SDL_ReleaseGPUShader(context.device, vertex_shader);
+        sdl3.SDL_ReleaseGPUShader(context.device, fragment_shader);
     }
 
     const image_data = try load_image("assets/spritesheets/roguelike_sheet.bmp");
@@ -181,8 +180,8 @@ pub fn main() !void {
 
     {
         const texture_transfer_ptr = sdl3.SDL_MapGPUTransferBuffer(context.device, texture_transfer_buffer, false);
-        defer sdl3.SDL_UnmapGPUTransferBuffer(context.device, texture_transfer_buffer);
         _ = sdl3.SDL_memcpy(texture_transfer_ptr, image_data.pixels, @intCast(image_data.w * image_data.h * 4));
+        sdl3.SDL_UnmapGPUTransferBuffer(context.device, texture_transfer_buffer);
     }
 
     context.texture = sdl3.SDL_CreateGPUTexture(context.device, &sdl3.SDL_GPUTextureCreateInfo{
@@ -232,6 +231,7 @@ pub fn main() !void {
     while (!gDone) {
         gDone = !update();
         try draw(&context);
+        sdl3.SDL_Delay(1);
     }
 
     sdl3.SDL_Quit();
@@ -308,8 +308,8 @@ fn draw(context: *Context) !void {
         const data_ptr: [*]SpriteInstance = @alignCast(@ptrCast(sdl3.SDL_MapGPUTransferBuffer(context.device, context.sprite_data_transfer_buffer, true) orelse return ZdbgError.CreationFailed));
         for (0..SPRITE_COUNT) |i| {
             const ravioli: usize = @intCast(sdl3.SDL_rand(4));
-            data_ptr[i].x = @floatFromInt(sdl3.SDL_rand(640));
-            data_ptr[i].y = @floatFromInt(sdl3.SDL_rand(480));
+            data_ptr[i].x = @floatFromInt(sdl3.SDL_rand(WINDOW_WIDTH));
+            data_ptr[i].y = @floatFromInt(sdl3.SDL_rand(WINDOW_HEIGH));
             data_ptr[i].z = 0;
             data_ptr[i].rotation = sdl3.SDL_randf() * sdl3.SDL_PI_F * 2;
             data_ptr[i].w = 32;
