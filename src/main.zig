@@ -3,10 +3,15 @@ const helpers = @import("./helper.zig");
 const sdl3 = @cImport({
     @cInclude("SDL3/SDL.h");
 });
+const sprite = @import("sprite.zig");
+const Mat4 = @import("math.zig").Mat4;
 
 var gDone: bool = false;
 const WINDOW_WIDTH = 1920;
 const WINDOW_HEIGH = 1080;
+const tile_size = 64.0;
+const MAX_X = 20;
+const MAX_Y = 15;
 
 const ZdbgError = error{
     SdlInitializationFailed,
@@ -14,26 +19,7 @@ const ZdbgError = error{
 };
 const DEBUG = false;
 
-const SPRITE_COUNT = 8192;
-
-const SpriteInstance = extern struct {
-    x: f32,
-    y: f32,
-    z: f32,
-    rotation: f32,
-    w: f32,
-    h: f32,
-    padding_a: f32,
-    padding_b: f32,
-    tex_u: f32,
-    tex_v: f32,
-    tex_w: f32,
-    tex_h: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-};
+const SPRITE_COUNT = MAX_X * MAX_Y;
 
 const Context = struct {
     device: *sdl3.SDL_GPUDevice,
@@ -144,6 +130,7 @@ pub fn main() !void {
         std.debug.print("could not initialized SDL: {s}", .{sdl3.SDL_GetError()});
         return ZdbgError.SdlInitializationFailed;
     }
+    sdl3.SDL_srand(0);
 
     var context: Context = undefined;
     try context_init(&context);
@@ -222,15 +209,39 @@ pub fn main() !void {
     sdl3.SDL_DestroySurface(image_data);
     sdl3.SDL_ReleaseGPUTransferBuffer(context.device, texture_transfer_buffer);
 
-    context.sprite_data_transfer_buffer = sdl3.SDL_CreateGPUTransferBuffer(context.device, &sdl3.SDL_GPUTransferBufferCreateInfo{ .usage = sdl3.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = SPRITE_COUNT * @sizeOf(SpriteInstance) }) orelse return ZdbgError.CreationFailed;
+    context.sprite_data_transfer_buffer = sdl3.SDL_CreateGPUTransferBuffer(context.device, &sdl3.SDL_GPUTransferBufferCreateInfo{ .usage = sdl3.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = SPRITE_COUNT * @sizeOf(sprite.Instance) }) orelse return ZdbgError.CreationFailed;
     context.sprite_data_buffer = sdl3.SDL_CreateGPUBuffer(context.device, &sdl3.SDL_GPUBufferCreateInfo{
         .usage = sdl3.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
-        .size = SPRITE_COUNT * @sizeOf(SpriteInstance),
+        .size = SPRITE_COUNT * @sizeOf(sprite.Instance),
     }) orelse return ZdbgError.CreationFailed;
+
+    const sprite_sheet = sprite.Sheet{};
+    var sprite_instances = try std.BoundedArray(sprite.Instance, SPRITE_COUNT).init(0);
+    for (0..MAX_Y) |y| {
+        for (0..MAX_X) |x| {
+            const xtex: usize = 5 + @as(usize, @intCast(sdl3.SDL_rand(5)));
+            const ytex: usize = @as(usize, @intCast(sdl3.SDL_rand(6)));
+            const tile = sprite_sheet.get(xtex, ytex);
+            const tint = 1; //sdl3.SDL_randf();
+            try sprite_instances.append(sprite.Instance{
+                .x = @as(f32, @floatFromInt(x)) * tile_size,
+                .y = @as(f32, @floatFromInt(y)) * tile_size,
+                .z = 0,
+                .rotation = 0,
+                .w = tile_size,
+                .h = tile_size,
+                .tex = tile,
+                .r = tint,
+                .g = tint,
+                .b = tint,
+                .a = 1.0,
+            });
+        }
+    }
 
     while (!gDone) {
         gDone = !update();
-        try draw(&context);
+        try draw(&context, sprite_instances.slice());
         sdl3.SDL_Delay(1);
     }
 
@@ -250,51 +261,8 @@ fn update() bool {
     return true;
 }
 
-const Matrix4x4 = extern struct {
-    m11: f32,
-    m12: f32,
-    m13: f32,
-    m14: f32,
-    m21: f32,
-    m22: f32,
-    m23: f32,
-    m24: f32,
-    m31: f32,
-    m32: f32,
-    m33: f32,
-    m34: f32,
-    m41: f32,
-    m42: f32,
-    m43: f32,
-    m44: f32,
-
-    fn CreateOrthographicOffCenter(left: f32, right: f32, bottom: f32, top: f32, z_near_plane: f32, z_far_plane: f32) Matrix4x4 {
-        return Matrix4x4{
-            .m11 = 2.0 / (right - left),
-            .m12 = 0,
-            .m13 = 0,
-            .m14 = 0,
-            .m21 = 0,
-            .m22 = 2.0 / (top - bottom),
-            .m23 = 0,
-            .m24 = 0,
-            .m31 = 0,
-            .m32 = 0,
-            .m33 = 1.0 / (z_near_plane - z_far_plane),
-            .m34 = 0,
-            .m41 = (left + right) / (left - right),
-            .m42 = (top + bottom) / (bottom - top),
-            .m43 = z_near_plane / (z_near_plane - z_far_plane),
-            .m44 = 1,
-        };
-    }
-};
-
-const uCoords = [4]f32{ 0.0, 0.5, 0.0, 0.5 };
-const vCoords = [4]f32{ 0.0, 0.0, 0.5, 0.5 };
-
-fn draw(context: *Context) !void {
-    const camera_matrix = Matrix4x4.CreateOrthographicOffCenter(0, WINDOW_WIDTH, WINDOW_HEIGH, 0, 0, -1);
+fn draw(context: *Context, sprite_instances: []sprite.Instance) !void {
+    const camera_matrix = Mat4.CreateOrthographicOffCenter(0, WINDOW_WIDTH, WINDOW_HEIGH, 0, 0, -1);
 
     const command_buffer = sdl3.SDL_AcquireGPUCommandBuffer(context.device) orelse return ZdbgError.CreationFailed;
 
@@ -305,23 +273,22 @@ fn draw(context: *Context) !void {
     }
 
     if (swapchain_texture != null) {
-        const data_ptr: [*]SpriteInstance = @alignCast(@ptrCast(sdl3.SDL_MapGPUTransferBuffer(context.device, context.sprite_data_transfer_buffer, true) orelse return ZdbgError.CreationFailed));
+        const data_ptr: [*]sprite.Instance = @alignCast(@ptrCast(sdl3.SDL_MapGPUTransferBuffer(context.device, context.sprite_data_transfer_buffer, true) orelse return ZdbgError.CreationFailed));
         for (0..SPRITE_COUNT) |i| {
-            const ravioli: usize = @intCast(sdl3.SDL_rand(4));
-            data_ptr[i].x = @floatFromInt(sdl3.SDL_rand(WINDOW_WIDTH));
-            data_ptr[i].y = @floatFromInt(sdl3.SDL_rand(WINDOW_HEIGH));
-            data_ptr[i].z = 0;
-            data_ptr[i].rotation = sdl3.SDL_randf() * sdl3.SDL_PI_F * 2;
-            data_ptr[i].w = 32;
-            data_ptr[i].h = 32;
-            data_ptr[i].tex_u = uCoords[ravioli];
-            data_ptr[i].tex_v = vCoords[ravioli];
-            data_ptr[i].tex_w = 0.5;
-            data_ptr[i].tex_h = 0.5;
-            data_ptr[i].r = 1.0;
-            data_ptr[i].g = 1.0;
-            data_ptr[i].b = 1.0;
-            data_ptr[i].a = 1.0;
+            data_ptr[i].x = sprite_instances[i].x;
+            data_ptr[i].y = sprite_instances[i].y;
+            data_ptr[i].z = sprite_instances[i].z;
+            data_ptr[i].rotation = sprite_instances[i].rotation;
+            data_ptr[i].w = sprite_instances[i].w;
+            data_ptr[i].h = sprite_instances[i].h;
+            data_ptr[i].tex.u = sprite_instances[i].tex.u;
+            data_ptr[i].tex.v = sprite_instances[i].tex.v;
+            data_ptr[i].tex.w = sprite_instances[i].tex.w;
+            data_ptr[i].tex.h = sprite_instances[i].tex.h;
+            data_ptr[i].r = sprite_instances[i].r;
+            data_ptr[i].g = sprite_instances[i].g;
+            data_ptr[i].b = sprite_instances[i].b;
+            data_ptr[i].a = sprite_instances[i].a;
         }
         sdl3.SDL_UnmapGPUTransferBuffer(context.device, context.sprite_data_transfer_buffer);
 
@@ -333,7 +300,7 @@ fn draw(context: *Context) !void {
         }, &sdl3.SDL_GPUBufferRegion{
             .buffer = context.sprite_data_buffer,
             .offset = 0,
-            .size = SPRITE_COUNT * @sizeOf(SpriteInstance),
+            .size = SPRITE_COUNT * @sizeOf(sprite.Instance),
         }, true);
         sdl3.SDL_EndGPUCopyPass(copy_pass);
 
@@ -351,7 +318,7 @@ fn draw(context: *Context) !void {
             .texture = context.texture,
             .sampler = context.sampler,
         }, 1);
-        sdl3.SDL_PushGPUVertexUniformData(command_buffer, 0, &camera_matrix, @sizeOf(Matrix4x4));
+        sdl3.SDL_PushGPUVertexUniformData(command_buffer, 0, &camera_matrix, @sizeOf(Mat4));
         sdl3.SDL_DrawGPUPrimitives(render_pass, SPRITE_COUNT * 6, 1, 0, 0);
 
         sdl3.SDL_EndGPURenderPass(render_pass);
