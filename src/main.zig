@@ -4,12 +4,14 @@ const sdl3 = @cImport({
     @cInclude("SDL3/SDL.h");
 });
 const sprite = @import("sprite.zig");
+const Texture = @import("texture.zig").Texture;
 const Mat4 = @import("math.zig").Mat4;
+const tiled = @import("tiled.zig");
 
 var gDone: bool = false;
 const WINDOW_WIDTH = 1920;
 const WINDOW_HEIGH = 1080;
-const tile_size = 64.0;
+const tile_size = 32.0;
 const MAX_X = 20;
 const MAX_Y = 15;
 
@@ -28,8 +30,8 @@ const Context = struct {
     sprite_data_transfer_buffer: *sdl3.SDL_GPUTransferBuffer,
     sprite_data_buffer: *sdl3.SDL_GPUBuffer,
     render_pipeline: *sdl3.SDL_GPUGraphicsPipeline,
-    texture: *sdl3.SDL_GPUTexture,
-    sampler: *sdl3.SDL_GPUSampler,
+
+    texture: Texture,
 };
 
 fn context_init(context: *Context) !void {
@@ -110,21 +112,6 @@ fn context_load_shader(context: *Context, filename: [*:0]const u8, sampler_count
     return shader;
 }
 
-fn load_image(filename: [*:0]const u8) !*sdl3.SDL_Surface {
-    var result: *sdl3.SDL_Surface = sdl3.SDL_LoadBMP(filename) orelse {
-        std.debug.print("failed to load BMP {s}: {s}", .{ filename, sdl3.SDL_GetError() });
-        return ZdbgError.CreationFailed;
-    };
-
-    const format = sdl3.SDL_PIXELFORMAT_ABGR8888;
-    if (result.format != format) {
-        const next = sdl3.SDL_ConvertSurface(result, format);
-        sdl3.SDL_DestroySurface(result);
-        result = next;
-    }
-    return result;
-}
-
 pub fn main() !void {
     if (!sdl3.SDL_Init(sdl3.SDL_INIT_VIDEO | sdl3.SDL_INIT_EVENTS)) {
         std.debug.print("could not initialized SDL: {s}", .{sdl3.SDL_GetError()});
@@ -159,89 +146,63 @@ pub fn main() !void {
         sdl3.SDL_ReleaseGPUShader(context.device, fragment_shader);
     }
 
-    const image_data = try load_image("assets/spritesheets/roguelike_sheet.bmp");
-    const texture_transfer_buffer = sdl3.SDL_CreateGPUTransferBuffer(context.device, &sdl3.SDL_GPUTransferBufferCreateInfo{
-        .usage = sdl3.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = @intCast(image_data.w * image_data.h * 4),
-    }) orelse return ZdbgError.CreationFailed;
+    context.texture = try Texture.create(context.device, "assets/spritesheets/roguelike_sheet.bmp", 16, 1);
+
+    // load all tiles from map, layer = z
+    // if tile value is 0, ignore it.
+    const Gpa = std.heap.GeneralPurposeAllocator(.{ .safety = true, .verbose_log = true });
+    var gpa = Gpa{};
+    defer {
+        const deinit_status = gpa.deinit();
+        //fail test; can't try in defer as defer is executed after we return
+        if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
+    }
+
+    var sprite_instances = try std.ArrayList(sprite.Instance).initCapacity(gpa.allocator(), SPRITE_COUNT * 4);
+    defer sprite_instances.deinit();
 
     {
-        const texture_transfer_ptr = sdl3.SDL_MapGPUTransferBuffer(context.device, texture_transfer_buffer, false);
-        _ = sdl3.SDL_memcpy(texture_transfer_ptr, image_data.pixels, @intCast(image_data.w * image_data.h * 4));
-        sdl3.SDL_UnmapGPUTransferBuffer(context.device, texture_transfer_buffer);
-    }
-
-    context.texture = sdl3.SDL_CreateGPUTexture(context.device, &sdl3.SDL_GPUTextureCreateInfo{
-        .type = sdl3.SDL_GPU_TEXTURETYPE_2D,
-        .format = sdl3.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-        .width = @intCast(image_data.w),
-        .height = @intCast(image_data.h),
-        .layer_count_or_depth = 1,
-        .num_levels = 1,
-        .usage = sdl3.SDL_GPU_TEXTUREUSAGE_SAMPLER,
-    }) orelse return ZdbgError.CreationFailed;
-    context.sampler = sdl3.SDL_CreateGPUSampler(context.device, &sdl3.SDL_GPUSamplerCreateInfo{
-        .min_filter = sdl3.SDL_GPU_FILTER_NEAREST,
-        .mag_filter = sdl3.SDL_GPU_FILTER_NEAREST,
-        .mipmap_mode = sdl3.SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
-        .address_mode_u = sdl3.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-        .address_mode_v = sdl3.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-        .address_mode_w = sdl3.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-    }) orelse return ZdbgError.CreationFailed;
-
-    const upload_command_buffer = sdl3.SDL_AcquireGPUCommandBuffer(context.device) orelse return ZdbgError.CreationFailed;
-    const copy_pass = sdl3.SDL_BeginGPUCopyPass(upload_command_buffer) orelse return ZdbgError.CreationFailed;
-
-    sdl3.SDL_UploadToGPUTexture(copy_pass, &sdl3.SDL_GPUTextureTransferInfo{
-        .transfer_buffer = texture_transfer_buffer,
-        .offset = 0,
-    }, &sdl3.SDL_GPUTextureRegion{
-        .texture = context.texture,
-        .w = @intCast(image_data.w),
-        .h = @intCast(image_data.h),
-        .d = 1,
-    }, false);
-
-    sdl3.SDL_EndGPUCopyPass(copy_pass);
-    if (!sdl3.SDL_SubmitGPUCommandBuffer(upload_command_buffer)) {
-        std.debug.print("SDL_SubmitGPUCommandBuffer failed: {s}", .{sdl3.SDL_GetError()});
-    }
-    sdl3.SDL_DestroySurface(image_data);
-    sdl3.SDL_ReleaseGPUTransferBuffer(context.device, texture_transfer_buffer);
-
-    context.sprite_data_transfer_buffer = sdl3.SDL_CreateGPUTransferBuffer(context.device, &sdl3.SDL_GPUTransferBufferCreateInfo{ .usage = sdl3.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = SPRITE_COUNT * @sizeOf(sprite.Instance) }) orelse return ZdbgError.CreationFailed;
-    context.sprite_data_buffer = sdl3.SDL_CreateGPUBuffer(context.device, &sdl3.SDL_GPUBufferCreateInfo{
-        .usage = sdl3.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
-        .size = SPRITE_COUNT * @sizeOf(sprite.Instance),
-    }) orelse return ZdbgError.CreationFailed;
-
-    const sprite_sheet = sprite.Sheet{};
-    var sprite_instances = try std.BoundedArray(sprite.Instance, SPRITE_COUNT).init(0);
-    for (0..MAX_Y) |y| {
-        for (0..MAX_X) |x| {
-            const xtex: usize = 5 + @as(usize, @intCast(sdl3.SDL_rand(5)));
-            const ytex: usize = @as(usize, @intCast(sdl3.SDL_rand(6)));
-            const tile = sprite_sheet.get(xtex, ytex);
-            const tint = 1; //sdl3.SDL_randf();
-            try sprite_instances.append(sprite.Instance{
-                .x = @as(f32, @floatFromInt(x)) * tile_size,
-                .y = @as(f32, @floatFromInt(y)) * tile_size,
-                .z = 0,
-                .rotation = 0,
-                .w = tile_size,
-                .h = tile_size,
-                .tex = tile,
-                .r = tint,
-                .g = tint,
-                .b = tint,
-                .a = 1.0,
-            });
+        var map_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer map_arena.deinit();
+        const map = try tiled.load_tiled_map(map_arena.allocator(), "assets/maps/map1.json");
+        const sprite_sheet = &context.texture.sheet;
+        for (map.layers, 0..) |layer, layer_z| {
+            for (layer.data, 0..) |value, index| {
+                if (value == 0) {
+                    continue;
+                }
+                const x = index % layer.width;
+                const y = index / layer.width;
+                const tile_id = value - 1;
+                const tile = sprite_sheet.get_index(tile_id);
+                const tint = 1; //sdl3.SDL_randf();
+                try sprite_instances.append(sprite.Instance{
+                    .x = @as(f32, @floatFromInt(x)) * tile_size,
+                    .y = @as(f32, @floatFromInt(y)) * tile_size,
+                    .z = @as(f32, @floatFromInt(layer_z)),
+                    .rotation = 0,
+                    .w = tile_size,
+                    .h = tile_size,
+                    .tex = tile,
+                    .r = tint,
+                    .g = tint,
+                    .b = tint,
+                    .a = 1.0,
+                });
+            }
         }
     }
 
+    const gpu_buffer_size: u32 = @intCast(sprite_instances.items.len * @sizeOf(sprite.Instance));
+    context.sprite_data_transfer_buffer = sdl3.SDL_CreateGPUTransferBuffer(context.device, &sdl3.SDL_GPUTransferBufferCreateInfo{ .usage = sdl3.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = gpu_buffer_size }) orelse return ZdbgError.CreationFailed;
+    context.sprite_data_buffer = sdl3.SDL_CreateGPUBuffer(context.device, &sdl3.SDL_GPUBufferCreateInfo{
+        .usage = sdl3.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+        .size = gpu_buffer_size,
+    }) orelse return ZdbgError.CreationFailed;
+
     while (!gDone) {
         gDone = !update();
-        try draw(&context, sprite_instances.slice());
+        try draw(&context, sprite_instances.items);
         sdl3.SDL_Delay(1);
     }
 
@@ -274,21 +235,21 @@ fn draw(context: *Context, sprite_instances: []sprite.Instance) !void {
 
     if (swapchain_texture != null) {
         const data_ptr: [*]sprite.Instance = @alignCast(@ptrCast(sdl3.SDL_MapGPUTransferBuffer(context.device, context.sprite_data_transfer_buffer, true) orelse return ZdbgError.CreationFailed));
-        for (0..SPRITE_COUNT) |i| {
-            data_ptr[i].x = sprite_instances[i].x;
-            data_ptr[i].y = sprite_instances[i].y;
-            data_ptr[i].z = sprite_instances[i].z;
-            data_ptr[i].rotation = sprite_instances[i].rotation;
-            data_ptr[i].w = sprite_instances[i].w;
-            data_ptr[i].h = sprite_instances[i].h;
-            data_ptr[i].tex.u = sprite_instances[i].tex.u;
-            data_ptr[i].tex.v = sprite_instances[i].tex.v;
-            data_ptr[i].tex.w = sprite_instances[i].tex.w;
-            data_ptr[i].tex.h = sprite_instances[i].tex.h;
-            data_ptr[i].r = sprite_instances[i].r;
-            data_ptr[i].g = sprite_instances[i].g;
-            data_ptr[i].b = sprite_instances[i].b;
-            data_ptr[i].a = sprite_instances[i].a;
+        for (sprite_instances, 0..) |sprite_instance, i| {
+            data_ptr[i].x = sprite_instance.x;
+            data_ptr[i].y = sprite_instance.y;
+            data_ptr[i].z = sprite_instance.z;
+            data_ptr[i].rotation = sprite_instance.rotation;
+            data_ptr[i].w = sprite_instance.w;
+            data_ptr[i].h = sprite_instance.h;
+            data_ptr[i].tex.u = sprite_instance.tex.u;
+            data_ptr[i].tex.v = sprite_instance.tex.v;
+            data_ptr[i].tex.w = sprite_instance.tex.w;
+            data_ptr[i].tex.h = sprite_instance.tex.h;
+            data_ptr[i].r = sprite_instance.r;
+            data_ptr[i].g = sprite_instance.g;
+            data_ptr[i].b = sprite_instance.b;
+            data_ptr[i].a = sprite_instance.a;
         }
         sdl3.SDL_UnmapGPUTransferBuffer(context.device, context.sprite_data_transfer_buffer);
 
@@ -300,7 +261,7 @@ fn draw(context: *Context, sprite_instances: []sprite.Instance) !void {
         }, &sdl3.SDL_GPUBufferRegion{
             .buffer = context.sprite_data_buffer,
             .offset = 0,
-            .size = SPRITE_COUNT * @sizeOf(sprite.Instance),
+            .size = @intCast(sprite_instances.len * @sizeOf(sprite.Instance)),
         }, true);
         sdl3.SDL_EndGPUCopyPass(copy_pass);
 
@@ -315,11 +276,11 @@ fn draw(context: *Context, sprite_instances: []sprite.Instance) !void {
         sdl3.SDL_BindGPUGraphicsPipeline(render_pass, context.render_pipeline);
         sdl3.SDL_BindGPUVertexStorageBuffers(render_pass, 0, &context.sprite_data_buffer, 1);
         sdl3.SDL_BindGPUFragmentSamplers(render_pass, 0, &sdl3.SDL_GPUTextureSamplerBinding{
-            .texture = context.texture,
-            .sampler = context.sampler,
+            .texture = context.texture.texture,
+            .sampler = context.texture.sampler,
         }, 1);
         sdl3.SDL_PushGPUVertexUniformData(command_buffer, 0, &camera_matrix, @sizeOf(Mat4));
-        sdl3.SDL_DrawGPUPrimitives(render_pass, SPRITE_COUNT * 6, 1, 0, 0);
+        sdl3.SDL_DrawGPUPrimitives(render_pass, @intCast(sprite_instances.len * 6), 1, 0, 0);
 
         sdl3.SDL_EndGPURenderPass(render_pass);
     }
